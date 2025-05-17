@@ -1,57 +1,55 @@
-from django.shortcuts import render
+import stripe
+from django.conf import settings
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import User, BlogPost
-from .serializers import UserSerializer, BlogPostSerializer
+from rest_framework import status
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
 
-# Create your views here.
-@api_view(['GET'])
-def get_users(request):
-    users = User.objects.all()
-    serialized_users = UserSerializer(users, many=True)
-    return Response(serialized_users.data)
+stripe.api_key = settings.STRIPE_SECRET_KEY
 
 @api_view(['POST'])
-def create_user(request):
-    data = request.data
-    serializer = UserSerializer(data=data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"message": "User created successfully", "data": serializer.data}, status=201)
-    else:
-        return Response({"error": serializer.errors}, status=400)
-
-@api_view(['GET'])
-def get_blog_posts(request):
-    data = BlogPost.objects.all()
-    serialized_data = BlogPostSerializer(data, many=True)
-    return Response(serialized_data.data)
-
-@api_view(['POST'])
-def create_blog_post(request):
-    data = request.data
-    serializer = BlogPostSerializer(data=data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"message": "Blog post created successfully", "data": serializer.data}, status=201)
-    else:
-        return Response({"error": serializer.errors}, status=400)
-
-@api_view(['PUT', 'DELETE'])
-def update_blog_post(request, pk):
+def create_checkout_session(request):
     try:
-        blog_post = BlogPost.objects.get(pk=pk)
-    except BlogPost.DoesNotExist:
-        return Response({"error": "Blog post not found"}, status=404)
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {
+                        'name': 'Test Product',
+                    },
+                    'unit_amount': 2000,  # $20.00
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url='https://example.com/success',
+            cancel_url='https://example.com/cancel',
+        )
+        return Response({'sessionId': session.id})
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    if request.method == 'PUT':
-        serializer = BlogPostSerializer(blog_post, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({"message": "Blog post updated successfully", "data": serializer.data}, status=200)
-        else:
-            return Response({"error": serializer.errors}, status=400)
 
-    elif request.method == 'DELETE':
-        blog_post.delete()
-        return Response({"message": "Blog post deleted successfully"}, status=204)
+@csrf_exempt
+@api_view(['POST'])
+def stripe_webhook(request):
+    payload = request.body
+    sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
+    event = None
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        return HttpResponse(status=400)
+    except stripe.error.SignatureVerificationError as e:
+        return HttpResponse(status=400)
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        print("Payment successful!", session)
+
+    return HttpResponse(status=200)
